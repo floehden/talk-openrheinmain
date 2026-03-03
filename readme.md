@@ -85,13 +85,11 @@ sudo containerlab deploy -t YAML/topology.clab.yml
 Deploy the `gnmic-operator` and the `kube-prometheus-stack` (Prometheus + Grafana).
 
 ```bash
-# Add Helm Repos
-helm repo add gnmic https://gnmic.openconfig.net/helm-charts
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
+helm install cert-manager oci://quay.io/jetstack/charts/cert-manager --version v1.19.4 \
+  --namespace cert-manager --create-namespace \
+  --set crds.enabled=true
 
-# Install Operators
-helm install gnmic-operator gnmic/gnmic-operator
+helm install gnmic-operator oci://ghcr.io/gnmic/operator/charts/gnmic-operator --version 0.2.0
 helm install prometheus prometheus-community/kube-prometheus-stack
 
 ```
@@ -102,7 +100,7 @@ Deploy the custom resources (CRDs) that define *what* to collect and *how*.
 
 ```bash
 # 1. Define the Targets (Routers)
-kubectl apply -f YAML/targets.yaml
+kubectl apply -f YAML/targets.yaml # edit the targets on how you need them!
 
 # 2. Define Subscriptions (Interfaces & CPU)
 kubectl apply -f YAML/subscriptions.yaml
