@@ -8,12 +8,11 @@ metadata:
     app.kubernetes.io/name: gnmic-router-metrics-10124
 spec:
   selector:
-    # This grabs your gnmic pods
     operator.gnmic.dev/cluster: telemetry-cluster 
   ports:
     - name: prom-metrics
-      port: 10124         # Explicitly use the real port
-      targetPort: 10124   # Explicitly target the real port
+      port: 10124        
+      targetPort: 10124  
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -29,7 +28,7 @@ spec:
     matchNames:
       - default
   endpoints:
-    - port: prom-metrics  # Prometheus will now scrape 10124
+    - port: prom-metrics  #
       path: /metrics
       interval: 15s
       scrapeTimeout: 10s

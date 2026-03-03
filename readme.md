@@ -99,6 +99,10 @@ helm install prometheus prometheus-community/kube-prometheus-stack
 Deploy the custom resources (CRDs) that define *what* to collect and *how*.
 
 ```bash
+kubectl create secret generic device-credentials \
+  --from-literal=username=admin \
+  --from-literal=password=NokiaSrl1!
+
 # 1. Define the Targets (Routers)
 kubectl apply -f YAML/targets.yaml # edit the targets on how you need them!
 
