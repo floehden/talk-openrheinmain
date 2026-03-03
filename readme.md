@@ -1,7 +1,3 @@
-Here is the updated README with the correct directory structure and commands pointing to the `YAML/` folder. This is ready to be dropped into your `README.md` file!
-
----
-
 # 🚀 Model-Driven Telemetry with gnmic-operator & SR Linux
 
 A complete, Cloud-Native observability stack for network devices running on Kubernetes. This repository deploys a simulated **Nokia SR Linux** fabric using [Containerlab](https://containerlab.dev/) and monitors it using the [gnmic-operator](https://operator.gnmic.dev/docs/) to stream gNMI telemetry into **Prometheus** and **Grafana**.
@@ -14,6 +10,44 @@ A complete, Cloud-Native observability stack for network devices running on Kube
 * **Visualization:** Grafana
 * **Infrastructure:** Kind / K3s / Orbstack (Kubernetes)
 
+### How it Works
+
+The following diagram illustrates the data flow from the simulated network fabric to the visualization layer.
+
+```mermaid
+graph TD
+    subgraph "Containerlab Simulation"
+        Spines[Spine Routers (SR Linux)]
+        Leafs[Leaf Routers (SR Linux)]
+    end
+
+    subgraph "Kubernetes Cluster"
+        Operator[gnmic-operator]
+        
+        subgraph "Telemetry Stack"
+            Collector(gnmic Collector Pod)
+            Prometheus[(Prometheus TSDB)]
+            Grafana[Grafana Dashboard]
+        end
+    end
+
+    %% Workflow
+    Operator --"Deploys & Configures"--> Collector
+    Collector --"1. Subscribe (gNMI Path: /interface/stats)"--> Spines
+    Collector --"1. Subscribe (gNMI Path: /platform/cpu)"--> Leafs
+    
+    Spines --"2. Stream Telemetry (gNMI Update)"--> Collector
+    Leafs --"2. Stream Telemetry (gNMI Update)"--> Collector
+    
+    Prometheus --"3. Scrape Metrics (HTTP /metrics)"--> Collector
+    Grafana --"4. Query Data (PromQL)"--> Prometheus
+
+    style Collector fill:#f9f,stroke:#333,stroke-width:2px
+    style Spines fill:#bbf,stroke:#333,stroke-width:2px
+    style Leafs fill:#bbf,stroke:#333,stroke-width:2px
+
+```
+
 ## 📂 Repository Structure
 
 ```text
@@ -21,7 +55,6 @@ A complete, Cloud-Native observability stack for network devices running on Kube
 ├── README.md               # This file
 ├── dashboard.json          # Ready-to-use Grafana Dashboard Model
 └── YAML/
-    ├── topology.clab.yml   # Containerlab topology definition
     ├── targets.yaml        # gnmic Target & Secret CRDs
     ├── subscriptions.yaml  # Subscription CRDs (Interfaces, CPU, Environment)
     ├── output.yaml         # Pipeline & Output CRDs
