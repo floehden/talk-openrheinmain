@@ -17,17 +17,17 @@ The following diagram illustrates the data flow from the simulated network fabri
 ```mermaid
 graph TD
     subgraph "Containerlab Simulation"
-        Spines[Spine Routers (SR Linux)]
-        Leafs[Leaf Routers (SR Linux)]
+        Spines["Spine Routers (SR Linux)"]
+        Leafs["Leaf Routers (SR Linux)"]
     end
 
     subgraph "Kubernetes Cluster"
-        Operator[gnmic-operator]
+        Operator["gnmic-operator"]
         
         subgraph "Telemetry Stack"
-            Collector(gnmic Collector Pod)
-            Prometheus[(Prometheus TSDB)]
-            Grafana[Grafana Dashboard]
+            Collector("gnmic Collector Pod")
+            Prometheus[("Prometheus TSDB")]
+            Grafana["Grafana Dashboard"]
         end
     end
 
@@ -45,7 +45,6 @@ graph TD
     style Collector fill:#f9f,stroke:#333,stroke-width:2px
     style Spines fill:#bbf,stroke:#333,stroke-width:2px
     style Leafs fill:#bbf,stroke:#333,stroke-width:2px
-
 ```
 
 ## 📂 Repository Structure
