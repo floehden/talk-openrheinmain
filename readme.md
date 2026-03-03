@@ -19,13 +19,13 @@ A complete, Cloud-Native observability stack for network devices running on Kube
 ```text
 .
 ├── README.md               # This file
+├── dashboard.json          # Ready-to-use Grafana Dashboard Model
 └── YAML/
     ├── topology.clab.yml   # Containerlab topology definition
     ├── targets.yaml        # gnmic Target & Secret CRDs
     ├── subscriptions.yaml  # Subscription CRDs (Interfaces, CPU, Environment)
     ├── output.yaml         # Pipeline & Output CRDs
-    ├── service-fix.yaml    # ServiceMonitor fix for port translation
-    └── dashboard.json      # Ready-to-use Grafana Dashboard Model
+    └── service-fix.yaml    # ServiceMonitor fix for port translation
 
 ```
 
