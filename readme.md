@@ -41,10 +41,6 @@ graph TD
     
     Prometheus --"3. Scrape Metrics (HTTP /metrics)"--> Collector
     Grafana --"4. Query Data (PromQL)"--> Prometheus
-
-    style Collector fill:#f9f,stroke:#333,stroke-width:2px
-    style Spines fill:#bbf,stroke:#333,stroke-width:2px
-    style Leafs fill:#bbf,stroke:#333,stroke-width:2px
 ```
 
 ## 📂 Repository Structure
