@@ -40,7 +40,6 @@ kind: Cluster
 metadata:
   name: telemetry-cluster
 spec:
-  replicas: 2
   image: ghcr.io/openconfig/gnmic:latest
   api:
     restPort: 7890
