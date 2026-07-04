@@ -1,8 +1,8 @@
----
 apiVersion: operator.gnmic.dev/v1alpha1
 kind: TargetProfile
 metadata:
   name: default-profile
+  namespace: default
 spec:
   credentialsRef: device-credentials
   tls: {}
@@ -12,6 +12,7 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Target
 metadata:
   name: spine1
+  namespace: default
   labels:
     role: spine
 spec:
@@ -22,6 +23,7 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Target
 metadata:
   name: spine2
+  namespace: default
   labels:
     role: spine
 spec:
@@ -32,6 +34,7 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Target
 metadata:
   name: leaf1
+  namespace: default
   labels:
     role: leaf
 spec:
@@ -42,6 +45,7 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Target
 metadata:
   name: leaf2
+  namespace: default
   labels:
     role: leaf
 spec:
@@ -52,6 +56,7 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Target
 metadata:
   name: leaf3
+  namespace: default
   labels:
     role: leaf
 spec:
@@ -62,6 +67,7 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Subscription
 metadata:
   name: interface-stats
+  namespace: default
   labels:
     type: interfaces
 spec:
@@ -76,11 +82,11 @@ apiVersion: operator.gnmic.dev/v1alpha1
 kind: Subscription
 metadata:
   name: system-stats
+  namespace: default
   labels:
     type: system
 spec:
   paths:
-    # We filter specifically for the aggregate CPU stats to avoid the PID list
     - /platform/control[slot=A]/cpu[index=all]/total
   mode: STREAM/SAMPLE
   sampleInterval: 10s
