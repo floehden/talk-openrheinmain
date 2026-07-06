@@ -7,6 +7,7 @@ spec:
   credentialsRef: device-credentials
   tls: {}
   timeout: 10s
+  encoding: JSON_IETF
 ---
 apiVersion: operator.gnmic.dev/v1alpha1
 kind: Target

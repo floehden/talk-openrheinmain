@@ -19,7 +19,7 @@ metadata:
   name: gnmic-telemetry-10124
   namespace: default
   labels:
-    release: stable  
+    release: prometheus
 spec:
   selector:
     matchLabels:

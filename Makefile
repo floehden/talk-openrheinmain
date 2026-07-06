@@ -3,76 +3,14 @@ NAMESPACE := gitea
 VALUES_FILE := YAML/gitea-values.yaml
 REPO_NAME := network-observability-config
 
-# --- YAML DEFINITIONS ---
-
-define RUNNER_YAML
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: gitea-runner
-  namespace: $(NAMESPACE)
-  labels:
-    app: gitea-runner
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: gitea-runner
-  template:
-    metadata:
-      labels:
-        app: gitea-runner
-    spec:
-      containers:
-      - name: runner
-        image: gitea/act_runner:latest
-        env:
-        - name: GITEA_INSTANCE_URL
-          value: "http://gitea-http.gitea.svc.cluster.local:3000"
-        - name: GITEA_RUNNER_REGISTRATION_TOKEN
-          value: "TOKEN_PLACEHOLDER"
-        - name: GITEA_RUNNER_NAME
-          value: "k8s-local-runner"
-        - name: GITEA_RUNNER_LABELS
-          value: "ubuntu-latest"
-endef
-export RUNNER_YAML
-
-define FLUX_YAML
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: GitRepository
-metadata:
-  name: observability-config
-  namespace: flux-system
-spec:
-  interval: 1m
-  url: http://gitea-http.gitea.svc.cluster.local:3000/admin/$(REPO_NAME).git
-  ref:
-    branch: main
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: observability-sync
-  namespace: flux-system
-spec:
-  interval: 1m
-  sourceRef:
-    kind: GitRepository
-    name: observability-config
-  path: ./
-  prune: true
-endef
-export FLUX_YAML
-
 # --- TARGETS ---
 
-.PHONY: all deploy deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-flux teardown clean status
+.PHONY: all deploy deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-infrahub configure-infrahub sync-topology deploy-flux teardown clean status
 
 all: deploy
 
-# The master build command (Updated to include telemetry-infra before flux)
-deploy: deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-flux
+# The master build command (Now includes sync-topology)
+deploy: deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-infrahub configure-infrahub sync-topology deploy-flux
 	@echo "\n🚀 Lab deployment completely fully automated!"
 
 # 1. Setup Namespace, Secrets, and Helm
@@ -88,11 +26,13 @@ deploy-gitea:
 	helm repo update
 	helm upgrade --install gitea gitea-charts/gitea -f $(VALUES_FILE) -n $(NAMESPACE)
 
-# 2. Wait for Pod and Create Repo via API
+# 2. Wait for Pod and Create Repositories via API
 bootstrap-repo:
-	@echo "\n⏳ Waiting for Gitea pods to become ready (This takes a minute)..."
+	@echo "\n⏳ Giving Kubernetes a moment to schedule the pod..."
+	@sleep 5
+	@echo "⏳ Waiting for Gitea pods to become ready..."
 	kubectl wait --for=condition=ready pod -l app=gitea -n $(NAMESPACE) --timeout=300s
-	@echo "🛠️ Creating $(REPO_NAME) repository..."
+	@echo "🛠️ Creating repositories in Gitea..."
 	@bash -c ' \
 		kubectl port-forward svc/gitea-http 3000:3000 -n $(NAMESPACE) > /dev/null 2>&1 & \
 		PF_PID=$$! ; \
@@ -112,14 +52,13 @@ bootstrap-repo:
 			kill $$PF_PID 2>/dev/null || true ; \
 			exit 1 ; \
 		fi ; \
-		curl -s -X POST "http://localhost:3000/api/v1/user/repos" \
-			-H "accept: application/json" \
-			-H "Content-Type: application/json" \
-			-u "admin:password123" \
-			-d "{\"name\": \"$(REPO_NAME)\", \"description\": \"GitOps repo for gnmic-operator\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
+		echo "   Creating $(REPO_NAME)..." ; \
+		curl -s -X POST "http://localhost:3000/api/v1/user/repos" -H "accept: application/json" -H "Content-Type: application/json" -u "admin:password123" -d "{\"name\": \"$(REPO_NAME)\", \"description\": \"GitOps repo for gnmic-operator\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
+		echo "   Creating infrahub-sync..." ; \
+		curl -s -X POST "http://localhost:3000/api/v1/user/repos" -H "accept: application/json" -H "Content-Type: application/json" -u "admin:password123" -d "{\"name\": \"infrahub-sync\", \"description\": \"Infrahub Schema and Generators\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
 		kill $$PF_PID 2>/dev/null || true \
 	'
-	@echo "✅ Repository created!"
+	@echo "✅ Repositories created!"
 
 # 3. Extract Token and Deploy CI/CD Runner
 deploy-runner:
@@ -127,7 +66,7 @@ deploy-runner:
 	@bash -c ' \
 		GITEA_POD=$$(kubectl get pods -n $(NAMESPACE) -l app=gitea -o jsonpath="{.items[0].metadata.name}"); \
 		RUNNER_TOKEN=$$(kubectl exec -n $(NAMESPACE) $$GITEA_POD -- gitea --config /data/gitea/conf/app.ini actions generate-runner-token); \
-		echo "$$RUNNER_YAML" | sed "s/TOKEN_PLACEHOLDER/$$RUNNER_TOKEN/g" | kubectl apply -f - \
+		cat YAML/gitea-runner.yaml | sed "s/TOKEN_PLACEHOLDER/$$RUNNER_TOKEN/g" | sed "s/NAMESPACE_PLACEHOLDER/$(NAMESPACE)/g" | kubectl apply -f - \
 	'
 	@echo "🏃 Runner deployed!"
 
@@ -142,15 +81,61 @@ deploy-telemetry-infra:
 	helm repo update
 	helm upgrade --install prometheus prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
 
-# 5. Install and Configure Flux GitOps
+# 5. Install Infrahub (Source of Truth)
+deploy-infrahub:
+	@echo "\n🏗️ Installing Infrahub..."
+	helm upgrade --install infrahub oci://registry.opsmill.io/opsmill/chart/infrahub --namespace infrahub --create-namespace
+
+# 6. Load Schema into Infrahub
+configure-infrahub:
+	@echo "\n⏳ Giving Kubernetes a moment to schedule the Infrahub pods..."
+	@sleep 10
+	@echo "⏳ Waiting for Infrahub APIs to initialize (Neo4j takes a few minutes)..."
+	@if ! command -v infrahubctl >/dev/null 2>&1; then \
+		echo "❌ ERROR: infrahub-sdk is not installed. Please run 'pip install infrahub-sdk' before deploying." ; \
+		exit 1 ; \
+	fi
+	@echo "   Waiting for infrahub-server pod to become ready..."
+	@kubectl wait --for=condition=ready pod -l infrahub/service=server -n infrahub --timeout=600s
+	@echo "   Extracting Admin Token and Injecting Topology Models..."
+	@bash -c ' \
+		INFRAHUB_POD=$$(kubectl get pod -l infrahub/service=server -n infrahub -o jsonpath="{.items[0].metadata.name}"); \
+		INFRAHUB_TOKEN=$$(kubectl exec -n infrahub $$INFRAHUB_POD -- printenv INFRAHUB_INITIAL_ADMIN_TOKEN | tr -d "\r"); \
+		export INFRAHUB_API_TOKEN="$$INFRAHUB_TOKEN"; \
+		export INFRAHUB_ADDRESS="http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000"; \
+		infrahubctl schema load YAML/schema.yml \
+	'
+	@echo "✅ Infrahub schema loaded!"
+
+# 7. Sync Containerlab Topology to Infrahub
+sync-topology:
+	@echo "\n🐍 Syncing Containerlab Topology into Infrahub..."
+	@if ! python3 -c "import yaml; import infrahub_sdk" >/dev/null 2>&1; then \
+		echo "❌ ERROR: Python dependencies missing. Run 'pip install infrahub-sdk pyyaml'." ; \
+		exit 1 ; \
+	fi
+	@bash -c ' \
+		INFRAHUB_POD=$$(kubectl get pod -l infrahub/service=server -n infrahub -o jsonpath="{.items[0].metadata.name}"); \
+		INFRAHUB_TOKEN=$$(kubectl exec -n infrahub $$INFRAHUB_POD -- printenv INFRAHUB_INITIAL_ADMIN_TOKEN | tr -d "\r"); \
+		export INFRAHUB_API_TOKEN="$$INFRAHUB_TOKEN"; \
+		export INFRAHUB_ADDRESS="http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000"; \
+		python3 sync_topology.py \
+	'
+	@echo "✅ Topology fully synced to the Source of Truth!"
+
+# 8. Install and Configure Flux GitOps
 deploy-flux:
+	@if ! command -v flux >/dev/null 2>&1; then \
+		echo "❌ ERROR: flux is not installed. Please install it with 'brew install flux' or 'pip install flux' before deploying." ; \
+		exit 1 ; \
+	fi
 	@echo "\n🌀 Installing Flux controllers..."
 	flux install
 	@echo "🔗 Connecting Flux to local Gitea repository..."
-	@echo "$$FLUX_YAML" | kubectl apply -f -
+	@cat YAML/flux-system.yaml | sed "s/REPO_NAME_PLACEHOLDER/$(REPO_NAME)/g" | kubectl apply -f -
 	@echo "✅ Flux connected!"
 
-# 6. The "Scorched Earth" Cleanup Command
+# 9. The "Scorched Earth" Cleanup Command
 teardown: clean
 clean:
 	@echo "\n🔥 Tearing down the lab..."
@@ -162,12 +147,14 @@ clean:
 	kubectl delete namespace gnmic-operator --ignore-not-found=true
 	helm uninstall prometheus -n monitoring > /dev/null 2>&1 || true
 	kubectl delete namespace monitoring --ignore-not-found=true
+	helm uninstall infrahub -n infrahub > /dev/null 2>&1 || true
+	kubectl delete namespace infrahub --ignore-not-found=true
 	flux uninstall -s || true
 	@echo "🗑️ Lab destroyed. Ready for a fresh start!"
 
-# 7. Check Lab Health
+# 10. Check Lab Health
 status:
 	@echo "\n📊 Checking Pods..."
-	kubectl get pods -A | grep -E 'gitea|cert-manager|gnmic|monitoring'
+	kubectl get pods -A | grep -E 'gitea|cert-manager|gnmic|monitoring|infrahub'
 	@echo "\n📊 Checking Flux Sync Status..."
 	flux get kustomizations
