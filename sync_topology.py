@@ -1,45 +1,70 @@
+import os
 import yaml
 import asyncio
-from infrahub_sdk import InfrahubClient
+from infrahub_sdk import InfrahubClient, Config
+
+CLAB_FILE = "YAML/st.clab.yml"
+REPO_LOCATION = "http://gitea-http.gitea.svc.cluster.local:3000/admin/infrahub-sync.git"
+
+# Which containerlab groups we import as network devices
+DEVICE_GROUPS = {"spine", "leaf"}
+
+
+async def get_or_create(client, kind, name, **attrs):
+    """Return an existing node by name, or create it. Keeps the script idempotent."""
+    existing = await client.filters(kind=kind, name__value=name)
+    if existing:
+        return existing[0]
+    obj = await client.create(kind=kind, name=name, **attrs)
+    await obj.save()
+    return obj
+
 
 async def main():
-    # Connect to the local Infrahub instance
-    client = InfrahubClient(address="http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000")
-    
-    print("🔗 1. Connecting Infrahub to Gitea Repository...")
-    # This creates the Git repository link inside Infrahub's Source of Truth
-    repo = await client.create(
-        kind="CoreRepository",
-        name="infrahub-sync",
-        location="http://gitea-http.gitea.svc.cluster.local:3000/admin/infrahub-sync.git",
-        commit="main"
+    client = InfrahubClient(
+        address=os.environ["INFRAHUB_ADDRESS"],
+        config=Config(api_token=os.environ["INFRAHUB_API_TOKEN"]),
     )
-    await repo.save()
-    print("   ✅ Repository Linked!")
+
+    print("🔗 1. Connecting Infrahub to Gitea Repository...")
+    existing_repo = await client.filters(kind="CoreRepository", name__value="infrahub-sync")
+    if existing_repo:
+        print("   ℹ️ Repository already linked, skipping.")
+    else:
+        repo = await client.create(
+            kind="CoreRepository",
+            name="infrahub-sync",
+            location=REPO_LOCATION,
+            commit="main",
+        )
+        await repo.save()
+        print("   ✅ Repository Linked!")
 
     print("\n📖 2. Parsing Containerlab Topology...")
-    with open("YAML/st.clab.yml", "r") as f:
+    with open(CLAB_FILE, "r") as f:
         clab = yaml.safe_load(f)
 
+    # In containerlab, nodes and links live UNDER the `topology` key
+    topology = clab.get("topology", {})
+    nodes = topology.get("nodes", {})
+    links = topology.get("links", [])
+    print(f"   Found {len(nodes)} nodes and {len(links)} links in the topology.")
+
     print("\n🏗️ 3. Creating Platforms and Roles...")
-    platform_srl = await client.create(kind="TopologyPlatform", name="nokia_srlinux")
-    await platform_srl.save()
-
-    role_spine = await client.create(kind="TopologyRole", name="spine")
-    await role_spine.save()
-
-    role_leaf = await client.create(kind="TopologyRole", name="leaf")
-    await role_leaf.save()
+    platform_srl = await get_or_create(client, "TopologyPlatform", "nokia_srlinux")
+    role_spine = await get_or_create(client, "TopologyRole", "spine")
+    role_leaf = await get_or_create(client, "TopologyRole", "leaf")
+    roles = {"spine": role_spine, "leaf": role_leaf}
 
     print("\n🖥️ 4. Creating Devices...")
     device_objs = {}
-    for node_name, node_data in clab.get("nodes", {}).items():
+    for node_name, node_data in nodes.items():
         group = node_data.get("group", "")
-        # We ONLY want to import Spines and Leafs (ignoring telemetry and clients)
-        if group in ["spine", "leaf"]:
-            dev = await client.create(kind="TopologyDevice", name=node_name)
+        # Only import spines and leafs (ignore clients, telemetry, logging)
+        if group in DEVICE_GROUPS:
+            dev = await get_or_create(client, "TopologyDevice", node_name)
             dev.platform = platform_srl
-            dev.role = role_spine if group == "spine" else role_leaf
+            dev.role = roles[group]
             await dev.save()
             device_objs[node_name] = dev
             print(f"   Created {group.capitalize()}: {node_name}")
@@ -47,19 +72,19 @@ async def main():
     print("\n🔌 5. Creating Interfaces and Wiring Connections...")
     interfaces_created = {}
 
-    # Helper function to avoid creating duplicate interfaces
     async def get_or_create_intf(device_name, intf_name):
-        if device_name not in interfaces_created:
-            interfaces_created[device_name] = {}
+        interfaces_created.setdefault(device_name, {})
         if intf_name not in interfaces_created[device_name]:
-            intf = await client.create(kind="TopologyInterface", name=intf_name)
-            intf.device = device_objs[device_name]
+            intf = await client.create(
+                kind="TopologyInterface",
+                name=intf_name,
+                device=device_objs[device_name],
+            )
             await intf.save()
             interfaces_created[device_name][intf_name] = intf
         return interfaces_created[device_name][intf_name]
 
-    # Process the physical cabling
-    for link in clab.get("links", []):
+    for link in links:
         endpoints = link.get("endpoints")
         if not endpoints or len(endpoints) != 2:
             continue
@@ -67,17 +92,17 @@ async def main():
         dev1_name, intf1_name = endpoints[0].split(":")
         dev2_name, intf2_name = endpoints[1].split(":")
 
-        # We only create the link if BOTH ends are routers we care about
+        # Only wire links where BOTH ends are devices we imported
         if dev1_name in device_objs and dev2_name in device_objs:
             intf1 = await get_or_create_intf(dev1_name, intf1_name)
             intf2 = await get_or_create_intf(dev2_name, intf2_name)
 
-            # Map the bidirectional connection in the Graph DB
             intf1.connected_endpoint = intf2
             await intf1.save()
             print(f"   Linked {dev1_name} ({intf1_name}) <---> {dev2_name} ({intf2_name})")
 
     print("\n🎉 Success! Containerlab topology is now live in Infrahub!")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -2,15 +2,35 @@
 NAMESPACE := gitea
 VALUES_FILE := YAML/gitea-values.yaml
 REPO_NAME := network-observability-config
+SYNC_REPO := infrahub-sync
+GITEA_USER := admin
+GITEA_PASS := password123
+
+# Local source dirs that get pushed into the Gitea repos during setup.
+FLUX_SRC := repo/network-observability-config
+SYNC_SRC := repo/infrahub-sync
+
+# Relay source
+RELAY_APP := relay/app.py
+RELAY_MANIFESTS := relay/relay-manifests.yaml
+RELAY_NS := infrahub-relay
+
+# In-cluster addresses
+INFRAHUB_ADDR := http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000
+GITEA_INCLUSTER := http://gitea-http.gitea.svc.cluster.local:3000
+RELAY_URL := http://infrahub-relay.infrahub-relay.svc.cluster.local/webhook
 
 # --- TARGETS ---
 
-.PHONY: all deploy deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-infrahub configure-infrahub sync-topology deploy-flux teardown clean status
+.PHONY: all deploy deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra \
+	deploy-infrahub configure-infrahub sync-topology bootstrap-workflow deploy-relay \
+	configure-webhook deploy-flux test-sync teardown clean status
 
 all: deploy
 
-# The master build command (Now includes sync-topology)
-deploy: deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-infrahub configure-infrahub sync-topology deploy-flux
+# The master build command
+deploy: deploy-gitea bootstrap-repo deploy-runner deploy-telemetry-infra deploy-infrahub \
+	configure-infrahub sync-topology bootstrap-workflow deploy-flux deploy-relay configure-webhook
 	@echo "\n🚀 Lab deployment completely fully automated!"
 
 # 1. Setup Namespace, Secrets, and Helm
@@ -19,7 +39,7 @@ deploy-gitea:
 	kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 	kubectl create secret generic gitea-admin-secret \
 		--from-literal=username=admin \
-		--from-literal=password=password123 \
+		--from-literal=password=$(GITEA_PASS) \
 		-n $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 	@echo "⛵ Deploying Gitea via Helm..."
 	helm repo add gitea-charts https://dl.gitea.com/charts/
@@ -53,9 +73,9 @@ bootstrap-repo:
 			exit 1 ; \
 		fi ; \
 		echo "   Creating $(REPO_NAME)..." ; \
-		curl -s -X POST "http://localhost:3000/api/v1/user/repos" -H "accept: application/json" -H "Content-Type: application/json" -u "admin:password123" -d "{\"name\": \"$(REPO_NAME)\", \"description\": \"GitOps repo for gnmic-operator\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
-		echo "   Creating infrahub-sync..." ; \
-		curl -s -X POST "http://localhost:3000/api/v1/user/repos" -H "accept: application/json" -H "Content-Type: application/json" -u "admin:password123" -d "{\"name\": \"infrahub-sync\", \"description\": \"Infrahub Schema and Generators\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
+		curl -s -X POST "http://localhost:3000/api/v1/user/repos" -H "accept: application/json" -H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" -d "{\"name\": \"$(REPO_NAME)\", \"description\": \"GitOps repo for gnmic-operator\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
+		echo "   Creating $(SYNC_REPO)..." ; \
+		curl -s -X POST "http://localhost:3000/api/v1/user/repos" -H "accept: application/json" -H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" -d "{\"name\": \"$(SYNC_REPO)\", \"description\": \"Infrahub Schema and Generators\", \"private\": false, \"auto_init\": true, \"default_branch\": \"main\"}" > /dev/null; \
 		kill $$PF_PID 2>/dev/null || true \
 	'
 	@echo "✅ Repositories created!"
@@ -102,7 +122,7 @@ configure-infrahub:
 		INFRAHUB_POD=$$(kubectl get pod -l infrahub/service=server -n infrahub -o jsonpath="{.items[0].metadata.name}"); \
 		INFRAHUB_TOKEN=$$(kubectl exec -n infrahub $$INFRAHUB_POD -- printenv INFRAHUB_INITIAL_ADMIN_TOKEN | tr -d "\r"); \
 		export INFRAHUB_API_TOKEN="$$INFRAHUB_TOKEN"; \
-		export INFRAHUB_ADDRESS="http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000"; \
+		export INFRAHUB_ADDRESS="$(INFRAHUB_ADDR)"; \
 		infrahubctl schema load YAML/schema.yml \
 	'
 	@echo "✅ Infrahub schema loaded!"
@@ -118,15 +138,43 @@ sync-topology:
 		INFRAHUB_POD=$$(kubectl get pod -l infrahub/service=server -n infrahub -o jsonpath="{.items[0].metadata.name}"); \
 		INFRAHUB_TOKEN=$$(kubectl exec -n infrahub $$INFRAHUB_POD -- printenv INFRAHUB_INITIAL_ADMIN_TOKEN | tr -d "\r"); \
 		export INFRAHUB_API_TOKEN="$$INFRAHUB_TOKEN"; \
-		export INFRAHUB_ADDRESS="http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000"; \
+		export INFRAHUB_ADDRESS="$(INFRAHUB_ADDR)"; \
 		python3 sync_topology.py \
 	'
 	@echo "✅ Topology fully synced to the Source of Truth!"
 
+# 7b. Push render script + workflow into infrahub-sync, static manifests into the Flux repo.
+bootstrap-workflow:
+	@echo "\n📤 Pushing automation into Gitea repositories..."
+	@if [ ! -d "$(SYNC_SRC)" ]; then echo "❌ ERROR: $(SYNC_SRC) not found."; exit 1; fi
+	@if [ ! -d "$(FLUX_SRC)" ]; then echo "❌ ERROR: $(FLUX_SRC) not found."; exit 1; fi
+	@bash -c ' \
+		set -e ; \
+		kubectl port-forward svc/gitea-http 3000:3000 -n $(NAMESPACE) > /dev/null 2>&1 & \
+		PF_PID=$$! ; \
+		sleep 3 ; \
+		WORK=$$(mktemp -d) ; \
+		echo "   Populating $(SYNC_REPO)..." ; \
+		git clone -q http://$(GITEA_USER):$(GITEA_PASS)@localhost:3000/$(GITEA_USER)/$(SYNC_REPO).git $$WORK/sync ; \
+		cp -r $(SYNC_SRC)/. $$WORK/sync/ ; \
+		cd $$WORK/sync ; git add -A ; \
+		git -c user.email=bot@lab.local -c user.name=setup commit -q -m "Add render script and sync workflow" || echo "   (nothing new in $(SYNC_REPO))" ; \
+		git push -q origin main ; cd - > /dev/null ; \
+		echo "   Populating $(REPO_NAME)..." ; \
+		git clone -q http://$(GITEA_USER):$(GITEA_PASS)@localhost:3000/$(GITEA_USER)/$(REPO_NAME).git $$WORK/flux ; \
+		cp -r $(FLUX_SRC)/. $$WORK/flux/ ; \
+		cd $$WORK/flux ; git add -A ; \
+		git -c user.email=bot@lab.local -c user.name=setup commit -q -m "Add initial telemetry manifests" || echo "   (nothing new in $(REPO_NAME))" ; \
+		git push -q origin main ; cd - > /dev/null ; \
+		rm -rf $$WORK ; \
+		kill $$PF_PID 2>/dev/null || true \
+	'
+	@echo "✅ Automation pushed to both repositories!"
+
 # 8. Install and Configure Flux GitOps
 deploy-flux:
 	@if ! command -v flux >/dev/null 2>&1; then \
-		echo "❌ ERROR: flux is not installed. Please install it with 'brew install flux' or 'pip install flux' before deploying." ; \
+		echo "❌ ERROR: flux is not installed. Please install it with 'brew install flux' before deploying." ; \
 		exit 1 ; \
 	fi
 	@echo "\n🌀 Installing Flux controllers..."
@@ -134,6 +182,68 @@ deploy-flux:
 	@echo "🔗 Connecting Flux to local Gitea repository..."
 	@cat YAML/flux-system.yaml | sed "s/REPO_NAME_PLACEHOLDER/$(REPO_NAME)/g" | kubectl apply -f -
 	@echo "✅ Flux connected!"
+
+# 8b. Deploy the Infrahub->Gitea relay service.
+#     The app code is shipped as a ConfigMap built from relay/app.py, so there
+#     is no image to build or push — a stock python image runs it.
+deploy-relay:
+	@echo "\n🔀 Deploying Infrahub->Gitea relay..."
+	@if [ ! -f "$(RELAY_APP)" ]; then echo "❌ ERROR: $(RELAY_APP) not found."; exit 1; fi
+	kubectl apply -f $(RELAY_MANIFESTS)
+	@echo "   Building relay-code ConfigMap from $(RELAY_APP)..."
+	kubectl create configmap relay-code \
+		--from-file=app.py=$(RELAY_APP) \
+		-n $(RELAY_NS) --dry-run=client -o yaml | kubectl apply -f -
+	@echo "   Restarting relay to pick up code..."
+	kubectl rollout restart deployment/infrahub-relay -n $(RELAY_NS)
+	@echo "✅ Relay deployed!"
+
+# 8c. Mint Gitea token, inject into relay Secret, point Infrahub webhook at relay.
+configure-webhook:
+	@echo "\n🪝 Wiring Infrahub events -> relay -> Gitea..."
+	@bash -c ' \
+		set -e ; \
+		kubectl port-forward svc/gitea-http 3000:3000 -n $(NAMESPACE) > /dev/null 2>&1 & \
+		PF_PID=$$! ; \
+		sleep 3 ; \
+		echo "   Minting a Gitea API token..." ; \
+		TOKEN_JSON=$$(curl -s -X POST "http://localhost:3000/api/v1/users/$(GITEA_USER)/tokens" \
+			-H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" \
+			-d "{\"name\": \"relay-dispatch-$$(date +%s)\", \"scopes\": [\"write:repository\"]}") ; \
+		GITEA_TOKEN=$$(echo "$$TOKEN_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)[\"sha1\"])") ; \
+		if [ -z "$$GITEA_TOKEN" ]; then echo "   ❌ Failed to mint Gitea token: $$TOKEN_JSON"; kill $$PF_PID 2>/dev/null || true; exit 1; fi ; \
+		echo "   Injecting token into relay Secret..." ; \
+		kubectl create secret generic relay-secrets \
+			--from-literal=GITEA_TOKEN="$$GITEA_TOKEN" \
+			--from-literal=SHARED_KEY="" \
+			-n $(RELAY_NS) --dry-run=client -o yaml | kubectl apply -f - ; \
+		kubectl rollout restart deployment/infrahub-relay -n $(RELAY_NS) ; \
+		echo "   Waiting for relay to be ready..." ; \
+		kubectl rollout status deployment/infrahub-relay -n $(RELAY_NS) --timeout=120s ; \
+		echo "   Creating the Infrahub webhook -> relay..." ; \
+		INFRAHUB_POD=$$(kubectl get pod -l infrahub/service=server -n infrahub -o jsonpath="{.items[0].metadata.name}"); \
+		INFRAHUB_TOKEN=$$(kubectl exec -n infrahub $$INFRAHUB_POD -- printenv INFRAHUB_INITIAL_ADMIN_TOKEN | tr -d "\r"); \
+		export INFRAHUB_API_TOKEN="$$INFRAHUB_TOKEN"; \
+		export INFRAHUB_ADDRESS="$(INFRAHUB_ADDR)"; \
+		python3 configure_webhook.py "$(RELAY_URL)" "" ; \
+		kill $$PF_PID 2>/dev/null || true \
+	'
+	@echo "✅ Loop wired! Infrahub change -> relay -> Gitea workflow -> Flux."
+
+# 8d. Manually fire the workflow to validate render+commit without a real change.
+test-sync:
+	@echo "\n🧪 Manually triggering the sync workflow via Gitea dispatch..."
+	@bash -c ' \
+		set -e ; \
+		kubectl port-forward svc/gitea-http 3000:3000 -n $(NAMESPACE) > /dev/null 2>&1 & \
+		PF_PID=$$! ; \
+		sleep 3 ; \
+		curl -s -X POST "http://localhost:3000/api/v1/repos/$(GITEA_USER)/$(SYNC_REPO)/dispatches" \
+			-H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" \
+			-d "{\"event_type\": \"infrahub-sync\"}" ; \
+		echo "   Dispatched. Check the Actions tab of $(SYNC_REPO) for the run." ; \
+		kill $$PF_PID 2>/dev/null || true \
+	'
 
 # 9. The "Scorched Earth" Cleanup Command
 teardown: clean
@@ -149,12 +259,13 @@ clean:
 	kubectl delete namespace monitoring --ignore-not-found=true
 	helm uninstall infrahub -n infrahub > /dev/null 2>&1 || true
 	kubectl delete namespace infrahub --ignore-not-found=true
+	kubectl delete namespace $(RELAY_NS) --ignore-not-found=true
 	flux uninstall -s || true
 	@echo "🗑️ Lab destroyed. Ready for a fresh start!"
 
 # 10. Check Lab Health
 status:
 	@echo "\n📊 Checking Pods..."
-	kubectl get pods -A | grep -E 'gitea|cert-manager|gnmic|monitoring|infrahub'
+	kubectl get pods -A | grep -E 'gitea|cert-manager|gnmic|monitoring|infrahub|relay'
 	@echo "\n📊 Checking Flux Sync Status..."
 	flux get kustomizations

@@ -1,8 +1,5 @@
 ---
 version: "1.0"
-namespaces:
-  - name: Topology
-    description: Core Network Topology Models
 
 nodes:
   - name: Platform
@@ -32,9 +29,11 @@ nodes:
       - name: platform
         peer: TopologyPlatform
         cardinality: one
+        kind: Attribute
       - name: role
         peer: TopologyRole
         cardinality: one
+        kind: Attribute
 
   - name: Interface
     namespace: Topology
@@ -46,9 +45,13 @@ nodes:
       - name: device
         peer: TopologyDevice
         cardinality: one
+        optional: false
+        kind: Attribute
       - name: connected_endpoint
         peer: TopologyInterface
         cardinality: one
         optional: true
+        kind: Attribute
+        direction: outbound
     uniqueness_constraints:
-      - [device, name]
+      - ["device", "name__value"]
