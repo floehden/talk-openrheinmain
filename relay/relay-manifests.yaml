@@ -48,9 +48,9 @@ spec:
             - containerPort: 8080
           env:
             - name: GITEA_DISPATCH_URL
-              value: "http://gitea-http.gitea.svc.cluster.local:3000/api/v1/repos/admin/infrahub-sync/dispatches"
-            - name: DISPATCH_EVENT_TYPE
-              value: "infrahub-sync"
+              value: "http://gitea-http.gitea.svc.cluster.local:3000/api/v1/repos/admin/infrahub-sync/actions/workflows/sync-targets.yaml/dispatches"
+            - name: DISPATCH_REF
+              value: "main"
             - name: DEBOUNCE_SECONDS
               value: "5"
             - name: GITEA_TOKEN

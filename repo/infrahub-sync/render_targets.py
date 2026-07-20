@@ -2,17 +2,14 @@
 """
 Render gNMIc Target manifests from Infrahub (the single source of truth).
 
-This script is DECLARATIVE: it queries the full set of devices from Infrahub
-and rewrites the entire targets file. Devices removed from Infrahub simply do
-not appear in the output, so the subsequent git commit deletes them from the
-repo. Nothing here appends or diffs — the output is a pure function of the
-current Infrahub state.
+Declarative: queries the full set of devices and rewrites the entire targets
+file. Address and port now come from each device's gnmi_address / gnmi_port
+attributes in Infrahub — nothing about connectivity is hardcoded here anymore.
+Change a device's address in Infrahub and it flows through on the next sync.
 
-Environment variables:
-  INFRAHUB_ADDRESS        e.g. http://infrahub-infrahub-server.infrahub.svc.cluster.local:8000
-  INFRAHUB_API_TOKEN      admin/API token
-  TARGET_HOST_IP          host IP the gNMIc container dials (default 192.168.139.126)
-  OUTPUT_FILE             where to write (default 02-targets.yaml)
+Environment:
+  INFRAHUB_ADDRESS, INFRAHUB_API_TOKEN
+  OUTPUT_FILE   (default 02-targets.yaml)
 """
 import os
 import sys
@@ -20,27 +17,14 @@ import asyncio
 
 from infrahub_sdk import InfrahubClient, Config
 
-# containerlab host-side gNMI port mapping per device (57400 inside -> 574NN on host)
-# Adjust here if your clab port scheme changes.
-DEVICE_PORTS = {
-    "spine1": 57401,
-    "spine2": 57402,
-    "leaf1": 57411,
-    "leaf2": 57412,
-    "leaf3": 57413,
-}
-
-TARGET_HOST_IP = os.environ.get("TARGET_HOST_IP", "192.168.139.126")
 OUTPUT_FILE = os.environ.get("OUTPUT_FILE", "02-targets.yaml")
+DEFAULT_GNMI_PORT = 57400
 
-# Static header: profile + subscriptions live with the generated targets because
-# they are logically part of "what we scrape". The cluster/output/pipeline/
-# monitoring manifests are hand-managed in separate files and never touched here.
 HEADER = """\
 # ---------------------------------------------------------------------------
 # GENERATED FILE — DO NOT EDIT BY HAND.
-# Rendered from Infrahub by render_targets.py. Any manual change will be
-# overwritten on the next sync. Infrahub is the single source of truth.
+# Rendered from Infrahub by render_targets.py. Address/port come from each
+# device's gnmi_address / gnmi_port in Infrahub. Infrahub is the source of truth.
 # ---------------------------------------------------------------------------
 apiVersion: operator.gnmic.dev/v1alpha1
 kind: TargetProfile
@@ -64,7 +48,7 @@ metadata:
   labels:
     role: {role}
 spec:
-  address: {host}:{port}
+  address: {address}:{port}
   profile: default-profile
 """
 
@@ -101,17 +85,26 @@ spec:
 """
 
 
+def attr_value(node, attr, default=None):
+    """Safely read an attribute .value that may be missing/None."""
+    a = getattr(node, attr, None)
+    if a is None:
+        return default
+    v = getattr(a, "value", None)
+    return v if v is not None else default
+
+
 async def fetch_devices(client):
-    """Return list of (name, role) for every TopologyDevice in Infrahub."""
     devices = await client.all(kind="TopologyDevice", prefetch_relationships=True)
     result = []
     for dev in devices:
         name = dev.name.value
         role = None
-        # role is a relationship to TopologyRole; resolve its name
         if dev.role.peer:
             role = dev.role.peer.name.value
-        result.append((name, role))
+        address = attr_value(dev, "gnmi_address")
+        port = attr_value(dev, "gnmi_port", DEFAULT_GNMI_PORT)
+        result.append((name, role, address, port))
     return result
 
 
@@ -122,40 +115,38 @@ async def main():
     )
 
     devices = await fetch_devices(client)
-    devices.sort(key=lambda d: d[0])  # stable ordering -> clean git diffs
+    devices.sort(key=lambda d: d[0])
 
     if not devices:
         print("WARNING: Infrahub returned zero devices.", file=sys.stderr)
-        print("Refusing to render an empty target file (safety guard).", file=sys.stderr)
-        print("If you really intend to remove ALL targets, set ALLOW_EMPTY=1.", file=sys.stderr)
         if os.environ.get("ALLOW_EMPTY") != "1":
+            print("Refusing to render an empty target file (set ALLOW_EMPTY=1 to override).", file=sys.stderr)
             sys.exit(2)
 
     blocks = [HEADER]
+    rendered = []
     skipped = []
-    for name, role in devices:
-        port = DEVICE_PORTS.get(name)
-        if port is None:
+    for name, role, address, port in devices:
+        if not address:
             skipped.append(name)
             continue
         blocks.append(
             TARGET_TMPL.format(
                 name=name,
                 role=role or "unknown",
-                host=TARGET_HOST_IP,
-                port=port,
+                address=address,
+                port=port or DEFAULT_GNMI_PORT,
             )
         )
+        rendered.append(name)
     blocks.append(SUBSCRIPTIONS)
 
     with open(OUTPUT_FILE, "w") as f:
         f.write("".join(blocks))
 
-    rendered = [d[0] for d in devices if d[0] in DEVICE_PORTS]
     print(f"Rendered {len(rendered)} targets -> {OUTPUT_FILE}: {', '.join(rendered)}")
     if skipped:
-        print(f"NOTE: no port mapping for {', '.join(skipped)} — skipped. "
-              f"Add them to DEVICE_PORTS.", file=sys.stderr)
+        print(f"NOTE: skipped (no gnmi_address set in Infrahub): {', '.join(skipped)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

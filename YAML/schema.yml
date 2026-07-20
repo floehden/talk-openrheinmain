@@ -25,6 +25,16 @@ nodes:
       - name: name
         kind: Text
         unique: true
+      # gNMI reachability — the address/port gNMIc dials for telemetry.
+      # Stored as data so it can change in one place and flow through the system.
+      - name: gnmi_address
+        kind: IPHost
+        description: IP or hostname gNMIc connects to for this device
+        optional: true
+      - name: gnmi_port
+        kind: Number
+        description: TCP port for the gNMI subscription
+        optional: true
     relationships:
       - name: platform
         peer: TopologyPlatform
@@ -34,6 +44,11 @@ nodes:
         peer: TopologyRole
         cardinality: one
         kind: Attribute
+      - name: interfaces
+        peer: TopologyInterface
+        cardinality: many
+        kind: Component
+        identifier: "device__interface"
 
   - name: Interface
     namespace: Topology
@@ -45,8 +60,9 @@ nodes:
       - name: device
         peer: TopologyDevice
         cardinality: one
+        kind: Parent
         optional: false
-        kind: Attribute
+        identifier: "device__interface"
       - name: connected_endpoint
         peer: TopologyInterface
         cardinality: one

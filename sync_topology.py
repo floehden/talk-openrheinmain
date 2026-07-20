@@ -3,21 +3,54 @@ import yaml
 import asyncio
 from infrahub_sdk import InfrahubClient, Config
 
-CLAB_FILE = "YAML/st.clab.yml"
+CLAB_FILE = os.environ.get("CLAB_FILE", "YAML/st.clab.yml")
 REPO_LOCATION = "http://gitea-http.gitea.svc.cluster.local:3000/admin/infrahub-sync.git"
 
-# Which containerlab groups we import as network devices
+# Groups we import as network devices
 DEVICE_GROUPS = {"spine", "leaf"}
 
+# The host IP that exposes the containerlab gNMI ports. Today all devices are
+# reachable via this single docker-host IP + their mapped host port. Override
+# with GNMI_HOST_IP to point elsewhere. Later, you can instead store each
+# device's real mgmt IP (see USE_MGMT_IP below).
+GNMI_HOST_IP = os.environ.get("GNMI_HOST_IP", "192.168.139.126")
 
-async def get_or_create(client, kind, name, **attrs):
-    """Return an existing node by name, or create it. Keeps the script idempotent."""
-    existing = await client.filters(kind=kind, name__value=name)
-    if existing:
-        return existing[0]
-    obj = await client.create(kind=kind, name=name, **attrs)
-    await obj.save()
-    return obj
+# If set to "1", store each node's mgmt-ipv4 as the gnmi_address instead of the
+# shared host IP (for when devices become directly reachable). Port then
+# defaults to the in-container gNMI port (57400) unless a host mapping exists.
+USE_MGMT_IP = os.environ.get("USE_MGMT_IP", "0") == "1"
+
+# Default in-container gNMI port for SR Linux
+DEFAULT_GNMI_PORT = 57400
+
+
+def parse_host_port(node_data):
+    """Extract the host-side port from a clab 'ports' entry like '57401:57400'.
+    Returns the host port (left side) as int, or None if no mapping."""
+    ports = node_data.get("ports", [])
+    for mapping in ports:
+        # mapping is "HOSTPORT:CONTAINERPORT"
+        parts = str(mapping).split(":")
+        if len(parts) == 2:
+            try:
+                return int(parts[0])
+            except ValueError:
+                continue
+    return None
+
+
+def resolve_address_and_port(node_data):
+    """Decide what gnmi_address/gnmi_port to store for a node."""
+    host_port = parse_host_port(node_data)
+    if USE_MGMT_IP:
+        addr = node_data.get("mgmt-ipv4", GNMI_HOST_IP)
+        # when dialing the device directly, use the container gNMI port
+        port = DEFAULT_GNMI_PORT
+    else:
+        addr = GNMI_HOST_IP
+        # dialing the docker host, use the mapped host port
+        port = host_port if host_port is not None else DEFAULT_GNMI_PORT
+    return addr, port
 
 
 async def main():
@@ -44,7 +77,6 @@ async def main():
     with open(CLAB_FILE, "r") as f:
         clab = yaml.safe_load(f)
 
-    # In containerlab, nodes and links live UNDER the `topology` key
     topology = clab.get("topology", {})
     nodes = topology.get("nodes", {})
     links = topology.get("links", [])
@@ -56,18 +88,20 @@ async def main():
     role_leaf = await get_or_create(client, "TopologyRole", "leaf")
     roles = {"spine": role_spine, "leaf": role_leaf}
 
-    print("\n🖥️ 4. Creating Devices...")
+    print("\n🖥️ 4. Creating Devices (with gNMI address/port)...")
     device_objs = {}
     for node_name, node_data in nodes.items():
         group = node_data.get("group", "")
-        # Only import spines and leafs (ignore clients, telemetry, logging)
         if group in DEVICE_GROUPS:
+            addr, port = resolve_address_and_port(node_data)
             dev = await get_or_create(client, "TopologyDevice", node_name)
             dev.platform = platform_srl
             dev.role = roles[group]
+            dev.gnmi_address.value = addr
+            dev.gnmi_port.value = port
             await dev.save()
             device_objs[node_name] = dev
-            print(f"   Created {group.capitalize()}: {node_name}")
+            print(f"   Created {group.capitalize()}: {node_name} -> {addr}:{port}")
 
     print("\n🔌 5. Creating Interfaces and Wiring Connections...")
     interfaces_created = {}
@@ -88,20 +122,25 @@ async def main():
         endpoints = link.get("endpoints")
         if not endpoints or len(endpoints) != 2:
             continue
-
         dev1_name, intf1_name = endpoints[0].split(":")
         dev2_name, intf2_name = endpoints[1].split(":")
-
-        # Only wire links where BOTH ends are devices we imported
         if dev1_name in device_objs and dev2_name in device_objs:
             intf1 = await get_or_create_intf(dev1_name, intf1_name)
             intf2 = await get_or_create_intf(dev2_name, intf2_name)
-
             intf1.connected_endpoint = intf2
             await intf1.save()
             print(f"   Linked {dev1_name} ({intf1_name}) <---> {dev2_name} ({intf2_name})")
 
     print("\n🎉 Success! Containerlab topology is now live in Infrahub!")
+
+
+async def get_or_create(client, kind, name, **attrs):
+    existing = await client.filters(kind=kind, name__value=name)
+    if existing:
+        return existing[0]
+    obj = await client.create(kind=kind, name=name, **attrs)
+    await obj.save()
+    return obj
 
 
 if __name__ == "__main__":

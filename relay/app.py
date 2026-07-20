@@ -10,10 +10,15 @@ what Gitea's /dispatches endpoint expects. Rather than force either side to
 bend, this relay accepts whatever Infrahub sends and emits exactly what Gitea
 needs. It is intentionally tiny and stateless.
 
+Gitea (1.27) exposes workflow_dispatch, NOT GitHub-style repository_dispatch:
+  POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches
+with a JSON body of {"ref": "<branch>"}. We call exactly that.
+
 Environment variables (from the relay Secret/Deployment):
-  GITEA_DISPATCH_URL   full URL to the repo dispatches endpoint
+  GITEA_DISPATCH_URL   full workflow-dispatch URL, i.e.
+                       http://<host>/api/v1/repos/<owner>/<repo>/actions/workflows/<file>/dispatches
   GITEA_TOKEN          Gitea API token with write:repository scope
-  DISPATCH_EVENT_TYPE  event type string the workflow listens for (default: infrahub-sync)
+  DISPATCH_REF         git ref to run the workflow on (default: main)
   SHARED_KEY           optional; if set, verify Infrahub's webhook-signature header
   DEBOUNCE_SECONDS     optional; collapse bursts of events into one dispatch (default: 5)
 """
@@ -33,7 +38,7 @@ app = Flask(__name__)
 
 GITEA_DISPATCH_URL = os.environ["GITEA_DISPATCH_URL"]
 GITEA_TOKEN = os.environ["GITEA_TOKEN"]
-EVENT_TYPE = os.environ.get("DISPATCH_EVENT_TYPE", "infrahub-sync")
+DISPATCH_REF = os.environ.get("DISPATCH_REF", "main")
 SHARED_KEY = os.environ.get("SHARED_KEY", "")
 DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "5"))
 
@@ -50,7 +55,7 @@ def _dispatch():
     global _timer
     with _lock:
         _timer = None
-    body = json.dumps({"event_type": EVENT_TYPE}).encode()
+    body = json.dumps({"ref": DISPATCH_REF}).encode()
     req = urllib.request.Request(
         GITEA_DISPATCH_URL,
         data=body,

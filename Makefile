@@ -165,11 +165,28 @@ bootstrap-workflow:
 		cp -r $(FLUX_SRC)/. $$WORK/flux/ ; \
 		cd $$WORK/flux ; git add -A ; \
 		git -c user.email=bot@lab.local -c user.name=setup commit -q -m "Add initial telemetry manifests" || echo "   (nothing new in $(REPO_NAME))" ; \
-		git push -q origin main ; cd - > /dev/null ; \
+		git push -q origin main || echo "   (push to $(REPO_NAME) skipped/failed)" ; cd - > /dev/null ; \
 		rm -rf $$WORK ; \
+		echo "   Minting a push token and setting Gitea Actions secrets on $(SYNC_REPO)..." ; \
+		PUSH_TOKEN=$$(curl -s -X POST "http://localhost:3000/api/v1/users/$(GITEA_USER)/tokens" \
+			-H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" \
+			-d "{\"name\": \"push-$$(date +%s)\", \"scopes\": [\"write:repository\"]}" \
+			| python3 -c "import sys,json; print(json.load(sys.stdin)[\"sha1\"])") ; \
+		INFRAHUB_POD=$$(kubectl get pod -l infrahub/service=server -n infrahub -o jsonpath="{.items[0].metadata.name}"); \
+		INFRAHUB_TOKEN=$$(kubectl exec -n infrahub $$INFRAHUB_POD -- printenv INFRAHUB_INITIAL_ADMIN_TOKEN | tr -d "\r"); \
+		PUSH_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+			"http://localhost:3000/api/v1/repos/$(GITEA_USER)/$(SYNC_REPO)/actions/secrets/PUSH_PASSWORD" \
+			-H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" \
+			-d "{\"data\": \"$$PUSH_TOKEN\"}") ; \
+		echo "     PUSH_PASSWORD (token) -> HTTP $$PUSH_STATUS" ; \
+		TOK_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+			"http://localhost:3000/api/v1/repos/$(GITEA_USER)/$(SYNC_REPO)/actions/secrets/INFRAHUB_API_TOKEN" \
+			-H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" \
+			-d "{\"data\": \"$$INFRAHUB_TOKEN\"}") ; \
+		echo "     INFRAHUB_API_TOKEN -> HTTP $$TOK_STATUS" ; \
 		kill $$PF_PID 2>/dev/null || true \
 	'
-	@echo "✅ Automation pushed to both repositories!"
+	@echo "✅ Automation pushed and Actions secrets set!"
 
 # 8. Install and Configure Flux GitOps
 deploy-flux:
@@ -232,16 +249,21 @@ configure-webhook:
 
 # 8d. Manually fire the workflow to validate render+commit without a real change.
 test-sync:
-	@echo "\n🧪 Manually triggering the sync workflow via Gitea dispatch..."
+	@echo "\n🧪 Manually triggering the sync workflow via Gitea workflow_dispatch..."
 	@bash -c ' \
 		set -e ; \
 		kubectl port-forward svc/gitea-http 3000:3000 -n $(NAMESPACE) > /dev/null 2>&1 & \
 		PF_PID=$$! ; \
-		sleep 3 ; \
-		curl -s -X POST "http://localhost:3000/api/v1/repos/$(GITEA_USER)/$(SYNC_REPO)/dispatches" \
+		sleep 4 ; \
+		HTTP=$$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+			"http://localhost:3000/api/v1/repos/$(GITEA_USER)/$(SYNC_REPO)/actions/workflows/sync-targets.yaml/dispatches" \
 			-H "Content-Type: application/json" -u "$(GITEA_USER):$(GITEA_PASS)" \
-			-d "{\"event_type\": \"infrahub-sync\"}" ; \
-		echo "   Dispatched. Check the Actions tab of $(SYNC_REPO) for the run." ; \
+			-d "{\"ref\": \"main\"}") ; \
+		if [ "$$HTTP" = "204" ]; then \
+			echo "   ✅ Workflow dispatched (HTTP 204). Check the Actions tab of $(SYNC_REPO)." ; \
+		else \
+			echo "   ❌ Dispatch failed (HTTP $$HTTP)." ; \
+		fi ; \
 		kill $$PF_PID 2>/dev/null || true \
 	'
 
